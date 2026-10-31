@@ -1,0 +1,23 @@
+# Memory-safety signals: libxpc iOS 26.0 (23A340) -> 27.2 (24B115)
+# counts = occurrences in normalized ipsw disassembly (call sites/refs)
+
+primitive                26.0     27.2
+stack_chk_fail            146      223
+stack_chk_guard           306      469
+__xpc_api_misuse          203      250
+__strlcpy_chk               2        2
+_fmtcheck                   0        2
+memset_s                    1        1
+change_fdguard_np           1        2
+guarded_close_np            1        2
+mach_port_guard             4        2
+
+function-starts: 1791 -> 1545
+stack_chk_fail share of functions: 8.1% -> 14.4%
+
+key hardened functions (insns 26.0 -> 27.2):
+  _xpc_data_create                           38 -> 172
+  _xpc_install_remote_hooks                  47 -> 265
+  _string_builder_appendf                    67 -> 181
+  _string_builder_copy_string                 2 -> 62
+  __xpc_data_serialize_ool                  NEW -> 22

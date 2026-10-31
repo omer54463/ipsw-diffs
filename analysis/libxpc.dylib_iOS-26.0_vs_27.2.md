@@ -195,6 +195,85 @@ is inlining, and it accounts for the "1545 functions but +38% text" result.
 6. **Legacy removal.** `xpc_event_stream_check_in{,2}`, `xpc_bundle_copy_resource_path`, and the
    in-libxpc system-version-string family were dropped from the exports.
 
+## Memory-safety improvements
+
+These are the hardening changes, each verified in the two binaries (not inferred from version
+numbers). They cluster around untrusted input: data objects, the wire protocol, and the
+caller-supplied hook/attribute structs.
+
+### 1. `xpc_data` creation is now bounds- and NULL-checked
+
+`_xpc_data_create` grew **38 → 172 instructions**. iOS 26.0 took the `(bytes, length)` pair,
+built a `dispatch_data`, and returned — no validation. iOS 27.2 adds, up front:
+
+- **NULL-with-length check**: `cbz x1` on the byte pointer; a non-zero length with a NULL pointer
+  routes to the fatal `__xpc_api_misuse` handler. New string:
+  `"Tried to create an XPC data with NULL bytes and %zu length"`.
+- **A 16 KiB (`0x4000`) size threshold** (`cmp x20, #0x4, lsl #0xc; b.hi …`) selecting an
+  inline vs. `vm_allocate`/OOL path, **then a post-construction re-check** of
+  `dispatch_data_get_size` against the same bound that aborts hard (`__os_crash_msg` + `brk #0x1`)
+  on mismatch or overflow.
+
+### 2. Wire-protocol serialization size cap
+
+New string `"Attempted to serialize xpc_data that is too large for what the wire protocol
+currently supports. Length was %zu and max supported is %u"`, alongside the new
+`__xpc_data_serialize_ool` out-of-line path. The serializer now refuses oversized payloads
+instead of trusting the length — a guard against integer/length confusion on the message path.
+
+### 3. String builder fortified with `_chk` + growth invariants
+
+`_string_builder_copy_string` went **2 → 62** instructions and `_string_builder_appendf`
+**67 → 181**. The new bodies use `__strlcpy_chk` with `__builtin_object_size` and assert their
+own invariants, all new in 27.2:
+```
+assertion failure: "__builtin___strlcpy_chk(new_buffer, sb->buffer, new, __builtin_object_size(...)) < new"
+assertion failure: "new >= sb->size * 2"        (growth never shrinks the buffer)
+assertion failure: "sb->length < sb->size"      (length stays within capacity)
+```
+
+### 4. Hook/attribute struct ABI guards (type-confusion mitigation)
+
+`_xpc_install_remote_hooks` grew **47 → 265** instructions and now checks
+**`hooks->size == sizeof(*hooks)` (0x28)** before trusting the caller's table of function
+pointers; a mismatch aborts (`brk #0x1`). New assertions back this up:
+`"hooks->size == sizeof(*hooks)"`, `"hooks->send_reply"`, `"hooks->msg_dispose"`,
+`"hooks->extension.cls"`, `"hooks->extension.xet"`. The same style of check appears for
+spawn-attribute packing: `"packed == _xpc_spawnattr_binprefs_size(binprefs)"`. This prevents an
+undersized or stale caller struct from driving libxpc through uninitialized function pointers.
+
+### 5. Type and misuse checks on the API surface
+
+- `"Given object not of required type. Given: %s, required: %s"` — an explicit type-confusion
+  guard before operating on an object of the wrong `xpc_type`.
+- `"Reply messages must not be sent as notifications; use xpc_dictionary_send_reply()"`.
+- The fatal `__xpc_api_misuse` handler gained call sites: **203 → 250**, and expression-carrying
+  assertions grew by **+112** (tracking the doubled `__oslogstring`). More invalid states now
+  fail fast instead of corrupting memory.
+
+### 6. File-descriptor and port guards
+
+The fd-guard calls (`change_fdguard_np`, `guarded_close_np`) exist in both builds, but 27.2 wraps
+them in result assertions (`"change_fdguard_np(...)" -> %{errno}d`, `"guarded_close_np(fd,&guard)"
+-> %{errno}d`), so a failed guard operation now aborts rather than being ignored. Mach-port
+construction failures likewise became explicit faults (`"Kernel bug: Unexpected error from pipe
+mach_port_construct()"`).
+
+### 7. Format-string validation
+
+New import **`_fmtcheck`** (from libsystem_c), used in `__xpc_connection_cancelation_get_description`
+to validate a format string before use.
+
+### 8. Broader stack-canary coverage
+
+`___stack_chk_fail` call sites rose from **146 to 223**; as a share of functions that is
+**8.1% → 14.4%**. Part is the inlining concentrating canaries into larger functions, but the
+fraction still roughly doubled, so more of the code runs with stack-smashing detection.
+
+**Not a notable change:** pointer authentication. PAC instruction mix (`pacibsp`/`autibsp`/
+`retab`/`braa`/`blraa`) is flat once normalized for function count — arm64e PAC was already
+pervasive in 26.0 and the ABI did not tighten here.
+
 ## How this was produced
 
 ```
