@@ -1,215 +1,221 @@
-# libxpc.dylib: iOS 26.0 (23A340) → iOS 27.2 RC (24B115)
+# libxpc.dylib: iOS 26.0 (23A340) → iOS 27.2 (24B115)
 
-`/usr/lib/system/libxpc.dylib`, traced across every consecutive diff in [`iOS/`](../iOS)
-from the first public iOS 26 release to the latest iOS 27 build in this repo.
+A direct, end-to-end disassembly diff of `/usr/lib/system/libxpc.dylib` between the first
+public iOS 26 release and the iOS 27.2 RC.
 
-| | iOS 26.0 (23A340) | iOS 27.2 RC (24B115) |
+Unlike the per-build summaries under [`iOS/`](../iOS) (which chain ~17 consecutive deltas and
+have gaps where a build shipped no libxpc diff), this compares the two end binaries themselves.
+Both were pulled from the **iPhone17,1** restore images with [blacktop's ipsw](https://github.com/blacktop/ipsw),
+so it is a like-for-like, device-matched comparison. Method is in [How this was produced](#how-this-was-produced);
+raw diff lists are in [`data/`](data).
+
+## Identity
+
+| | iOS 26.0 (23A340) | iOS 27.2 (24B115) |
 | :-- | :-- | :-- |
-| Project version | `3089.0.11.0.0` | `3298.40.20.0.0` (last recorded, 24B5084k; no later libxpc diffs) |
-| UUID | `FD0E3621-E113-3F18-9F29-529D3B568825` | not recorded after 27.0 b1 |
-| `__TEXT.__text` | `0x3c034` (245,812 B) | `0x51b60` (334,688 B) on iPhone19,2 (+36%) |
-| `__TEXT.__cstring` | `0x7696` | `0x7ce6` |
-| `__TEXT.__oslogstring` | `0x1668` | `0x3109` (more than doubled) |
-| Functions / Symbols / CStrings | 1791 / 4488 / 1242 | 1545 / 2427 / 1296 (see caveats) |
+| `LC_ID_DYLIB` current version | **3089** | **3298.42.1** |
+| `LC_SOURCE_VERSION` | 3089.0.11.0.0 | 3298.42.1.0.0 |
+| `LC_BUILD_VERSION` | iOS, MinOS 26, SDK 26, ld 1220.3 | iOS, MinOS 27.2, SDK 27.2, ld 27106 |
+| Cache UUID (arm64e DSC) | C6340F50-… | (27.2 cache) |
+| `__TEXT.__text` | 0x3c034 (245,812 B) | **0x53074 (340,084 B, +38%)** |
+| `__TEXT.__cstring` | 0x7696 | 0x7d30 |
+| `__TEXT.__oslogstring` | 0x1668 | 0x3109 (≈ doubled) |
+| Function starts (`LC_FUNCTION_STARTS`) | **1791** | **1545** |
+| Disassembled instructions | 61,453 | 85,021 (+38%) |
+| Exported symbols (export trie) | 803 | 801 |
 
-## Build chain and versions
+The headline is counter-intuitive: **fewer functions but 38% more code.** 27.2 has 246 fewer
+function-starts yet ~24k more instructions. The cause is visible throughout the diff —
+aggressive inlining of cold paths and helper routines into their callers (see
+[Inlining](#inlining-fewer-functions-more-code)).
 
-Path followed: 26.0 → 26.1 → 26.2 → 26.3 → 26.4 → 26.5 → 27.0 → 27.2. The 26.6/26.7 branch and
-27.0.1 split off this path and are not on the line to 27.2.
+## Reliable signals vs. noise
 
-| Step | libxpc version | Change |
-| :-- | :-- | :-- |
-| 26.0 23A340 / 23A341 / 23A345 | 3089.0.11 | none recorded |
-| 26.1 b1 23B5044l | **3089.40.13.0.1** | big: assertion messages, os_log, reply-as-notification check |
-| 26.1 b2 23B5059e | 3089.40.15 | connection-failure diagnostics rework |
-| 26.1 b3 … 26.2 b1 | → 3089.60.3 | *version bumped, no libxpc diff in repo* |
-| 26.2 b2 23C5033h | 3089.60.4 | `-[OS_xpc_object debugDescription]` tweak |
-| 26.2 … 26.2 23C55 | → 3089.60.7 | *no diff in repo* |
-| 26.3 b1 23D5089e | 3089.80.8 | `launch_load_jetsam_properties_path` |
-| 26.3 b2 23D5103d | → 3089.80.9 | *no diff in repo* |
-| 26.3 b3 23D5114d | 3089.80.10.502.3 | bundle executable-missing error |
-| 26.3 23D125 | 3089.82.3 | rebuild only |
-| 26.4 b1 23E5207q | **3102.100.97.502.1** | big: port derivation, system-version code moved out, transaction logging |
-| 26.4 b2 23E5218e | 3102.100.101.502.1 | cryptex path resolution |
-| 26.4 … 26.4 23E246 | → 3102.102.1 | *no diff in repo* |
-| 26.5 b1 23F5043g | 3102.120.11 | attrs/entitlement lookup by pid |
-| 26.5 … 26.5 23F77 | → 3102.120.13 | *no diff in repo* |
-| 27.0 b1 24A5355q | **3295.0.0.502.1** | major: connection init refactor, BS check-in info, sanitizer flags, … |
-| 27.0 b2 24A5370h | 3298.0.4.502.1 | recompile: 140 functions change size by ±4–48 B, the rest hash-only |
-| 27.0 b3 24A5380h | 3298.0.10 | hash functions shrink by 8 B |
-| 27.0 b4 24A5390f | 3298.0.21 | content-only change |
-| 27.0 b5 24A5408d | 3298.0.26.502.1 | port init and duplicate-extension check |
-| 27.0 b6 … RC | → 3298.2.1 | *no diff in repo* |
-| 27.0 24A435 | 3298.2.1 | event-publisher subscriptions, bundle variant subpath |
-| 27.2 b1 24B5084k | 3298.40.20 | `_libxpc_initializer` +8 B |
-| 27.2 b2 24B5089g | — | `__DATA_DIRTY.__bss` 0x138 → 0x140 |
-| 27.2 b3 … RC 24B115 | — | no libxpc diff recorded |
+Two things in a DSC symbol diff are trustworthy, and one is not:
 
-## Changes by release
+- **Trustworthy — export trie** (803 → 801) and **cstrings/oslog strings**. These live in the
+  binary itself.
+- **Trustworthy — `LC_FUNCTION_STARTS`** (1791 → 1545): a name-independent count of real functions.
+- **Not trustworthy — the private/local symbol *names*.** iOS 27's local symbol table (the DSC
+  `.symbols` file) carries far fewer private names than iOS 26's. A raw name diff reports ~197
+  internal symbols "removed," but most still exist as code — e.g. `__xpc_retain`, `__xpc_release`,
+  `_do_mach_notify_send_once`, `__xpc_dictionary_set_value` all show as "removed" yet are plainly
+  still present. **The lists in [`data/symbols_removed_or_stripped.txt`](data/symbols_removed_or_stripped.txt)
+  mix genuine removals with mere name-stripping and must not be read as "deleted."** Everything
+  below is drawn from the export trie, the strings, and the function-body diff, which are not
+  affected by stripping.
 
-### iOS 26.1: hardening and diagnostics (3089.0.11 → 3089.40.15)
+## Public API changes (export trie — authoritative)
 
-**26.1 b1 (23B5044l)**: `__text` grew 0x3c034 → 0x42244 (+25 KB, +119 functions), `__oslogstring` doubled.
+**Added (7):**
 
-- **Assertions now carry a message.** About 120 new `assertion failure: "<expr>" -> %llu` strings.
-  Internal invariants that used to crash without context now report the failing expression. They cover
-  connections, listeners, sessions, the serializer/deserializer (`xgd->_depth`, `_ool_callback`, string caches),
-  activities (`_xpc_activity_is_unmanaged()`, eligibility handlers), file transfers, event publishers, spawnattr
-  binprefs, and mach-port guarding (`change_fdguard_np`, `guarded_close_np`). The new `__os_crash_msg`,
-  `__os_log_send_and_compose_impl` and `__os_log_default` symbols match this.
-- **New misuse checks**:
-  - `"Reply messages must not be sent as notifications; use xpc_dictionary_send_reply()"`
-  - `"Given object not of required type. Given: %s, required: %s"`
-- Transactions: `__os_transaction_log_snapshot` is new. `"on activation of exit_when_clean"` was added.
-- New `__xpc_allocate_buffer` and `_xpc_data_create.cold.1` (an xpc_data allocation path).
-- **Removed: `_xpc_bundle_copy_resource_path`, `_xpc_event_stream_check_in`, `_xpc_event_stream_check_in2`**
-  (legacy event-stream check-in), and the `__xpc_is_being_debugged` dispatch-once machinery.
+| Symbol | What it is |
+| :-- | :-- |
+| `_xpc_connection_set_bs_checkin_info` | Set BoardServices check-in info on a connection |
+| `_xpc_connection_consume_bs_checkin_info` | Consume that check-in info |
+| `_xpc_service_instance_set_sanitizer_flags` | Run an XPC service instance under sanitizer flags |
+| `_launch_get_user_context` | launchd user-context lookup |
+| `_launch_load_jetsam_properties_path` | Load jetsam properties from a path |
+| `_amfi_interface_authorize_local_signing_with_length` | AMFI local-signing authorization (re-export) |
+| `__xpc_spawnattr_pack_xpc_data` | Pack spawn attributes as xpc_data |
 
-**26.1 b2 (23B5059e)**: connection cancellation was reworked.
+**Removed (9):**
 
-- New `__xpc_connection_cancelation_description` and `__xpc_connection_cancelation_get_description`.
-  `xpc_connection_copy_invalidation_reason` grew 32 → 84 B.
-- Error strings used to be built from fragments (`"failed at %s%s with error %d - %s"` + `"lookup"`,
-  `" (reconnect)"` …). Each failure site now has its own string, for example
-  `"Connection init failed at lookup with error %d - %s"` and `"Reconnect failed at send right creation …"`.
-  The phrases were also capitalized: `"Client is gone"`, `"Peer image changed"`.
-- Imports `fmtcheck`, which validates format strings.
+| Symbol | Note |
+| :-- | :-- |
+| `_xpc_event_stream_check_in`, `_xpc_event_stream_check_in2` | Legacy event-stream check-in, retired |
+| `_xpc_bundle_copy_resource_path` | Bundle resource-path helper, gone |
+| `_xpc_dictionary_get_connection` | Removed from the export trie (the `.symbols` file no longer lists it either) |
+| `__system_version_copy_string_plist` / `_sysctl` / `_fallback` / `_parse_string` / `_plist_path` | The whole system-version-string family moved out of libxpc |
 
-### iOS 26.2 (→ 3089.60.7)
+## Strings added (verified in `__cstring`/`__oslogstring`)
 
-- `-[OS_xpc_object debugDescription]` 260 → 280 B. Nothing else was recorded.
+169 new strings, 112 removed. Full lists: [`data/strings_added.txt`](data/strings_added.txt),
+[`data/strings_removed.txt`](data/strings_removed.txt). The substantive ones:
 
-### iOS 26.3 (→ 3089.82.3)
+**BoardServices check-in info (new SPI) — strict state machine:**
+```
+"Attempt to set the bs_checkin_info on a {listener|live|peer|non-bs_type} connection."
+"Attempt to fetch the bs_checkin_info on a {listener|live|non-peer} connection."
+"Cannot set NONE when specifying checkin info."
+"Check-in is too big : %zu"              "[%p] invalid checkin_info length : %zu"
+"[%p] bs_checkin_info failed to encode : %s"   "[%p] bs_checkin_info failed to decode"
+"[%p] bs_checkin_info is too big : %s"
+```
+The old property was also renamed: `"Attempt to change the bs_managed propertyon a live
+connection."` (26.0, note the typo) → `"Attempt to change the bs_type property on a live
+connection."` (27.2).
 
-- New `launch_load_jetsam_properties_path` (b1).
-- `__xpc_bundle_resolve_executable` gained `"The executable did not ship in the bundle"` (b3).
+**Connection setup/teardown — per-site diagnostics.** 26.0 assembled one message from fragments
+(`"failed at %s%s with error %d - %s"` + `"lookup"`, `"send right creation"`, `" (reconnect)"`, …).
+27.2 has a distinct string per failure site:
+```
+"Connection init failed at lookup with error %d - %s"
+"Connection init failed at {listener activation|no-senders registration|receive right creation|send right creation} with error %d - %s"
+"Connection init failed with readying error with error %d - %s"
+"Reconnect failed at …"   "Finalizing BS connection"   "Peer image changed"   "Client is gone"
+```
 
-### iOS 26.4: new 3102 train (3089.82.3 → 3102.102.1)
+**Sanitizers / hardening:**
+```
+"sanitizers"
+"Reply messages must not be sent as notifications; use xpc_dictionary_send_reply()"
+"Given object not of required type. Given: %s, required: %s"
+"Attempted to serialize xpc_data that is too large for what the wire protocol currently supports. Length was %zu and max supported is %u"
+"Tried to create an XPC data with NULL bytes and %zu length"
+"Kernel bug: Unexpected error from pipe mach_port_construct()"
+"Kernel bug: Unexpected error from service attach port mach_port_construct()"
+```
 
-**26.4 b1 (23E5207q)**:
+**Assertion messages (+112).** iOS 26.0 already had expression-carrying assertions; 27.2 adds 112
+more `assertion failure: "<expr>" -> %llu` strings, matching the doubled `__oslogstring`.
 
-- **Port derivation**: new `__xpc_connection_derive_connection_port`, `__xpc_connection_init_recv_port`,
-  `__xpc_pipe_derive_port`. Two new crash strings:
-  `"Kernel bug: Unexpected error from pipe mach_port_construct()"` and
-  `"... service attach port mach_port_construct()"`.
-- **System-version code moved out of libxpc.** These were removed: `__system_version_*`,
-  `_os_system_version_get_current_version.*`, `_populate_current_*version`, `_parsed_*version`.
-  Their replacements are `__os_system_version_initialize`, `__current_version`, `__current_dyld_version.*` and
-  `__sim_current_host_version`. `__availability_version_check.cold.1` is gone.
-- **Size limits on xpc_data**: `"Attempted to serialize xpc_data that is too large for what the wire protocol
-  currently supports…"` and `"Tried to create an XPC data with NULL bytes and %zu length"`.
-- Transactions: `"[%p] '%s': Transaction created/released"` debug logs. `_os_transaction_create` and
-  `__os_transaction_xref_dispose` gained cold paths.
-- New `_launch_get_user_context`, `__xpc_session_fault`, `__copy_key_from_plist`, `__copy_path_in_shared_cache`.
-  New strings `"pid domain"`, `"loginwindow"`, `"token.pid"`, `"bssendp"`.
-- `"Could not get attrs using %s for connection %s, pid %d…"` (`__xpc_connection_copy_attrs`).
-- Removed: `__xpc_assert_dumping_ground`, `__xpc_plist_parse_date`, `_der_vm_CEType_from_ccder_tag`,
-  `__os_once`, and the strings `"Peer rejected"` and `"Underlying connection invalidated"`.
+**Other:** `"The executable did not ship in the bundle"`, `"An extension with the same bundle ID
+already exists with a different path"`, `"bundle %s missing from disk and dyld shared cache"`,
+transaction logs `"[%p] '%s': Transaction created/released"`, and keys `"pid domain"`,
+`"loginwindow"`, `"token.pid"`, `"bssendp"`.
 
-**26.4 b2 (23E5218e)**: cryptex-aware path resolution.
+**Removed:** the fragment-assembly strings above, `"Peer rejected"`, `"Underlying connection
+invalidated"`, `"Attempt to send non-reply message as reply"`, `"Bug in libxpc: Unexpected
+disposition"`, and a batch of ObjC runtime selector/type strings (`"respondsToSelector:"`,
+`"v16@0:8"`, `"OS_os_transaction"`, …) that are no longer emitted as plain cstrings.
 
-- New `__cryptex_prefix_paths`, `__trim_trailing_slashes`, `__xpc_resolve_real_path`, `__normalize_cryptex_path` cold path.
-  `__copy_path_in_shared_cache` was dropped.
-- The bundle errors were simplified to `"bundle %s missing from disk and dyld shared cache"`, without the errno.
+## New functions (body diff — 61 real, verified present in 27.2)
 
-### iOS 26.5 (→ 3102.120.13)
+Full list (incl. compiler helpers): [`data/symbols_added.txt`](data/symbols_added.txt). Grouped:
 
-- `__xpc_connection_copy_attrs` grew 472 → 564 B and `xpc_copy_entitlement_for_token` 140 → 212 B. The new
-  `"Could not get attrs using %s for pid %d…"` shows that lookups now go by pid without needing a connection.
+**Connection init split into single-purpose functions.** This is the central refactor and it is
+provable from the bodies: `__xpc_connection_init` collapsed from **486 → 88 instructions**, with
+the work moved into new functions:
+```
+__xpc_connection_init_send      __xpc_connection_init_recv       __xpc_connection_init_term
+__xpc_connection_init_send_named  __xpc_connection_init_recv_named
+__xpc_connection_init_send_anon   __xpc_connection_init_recv_anon
+__xpc_connection_init_recv_port   __xpc_connection_init_no_more_senders
+__xpc_connection_init_cleanup_from_failed_readying
+__xpc_connection_derive_connection_port   __xpc_connection_pipe_check_in
+__xpc_connection_handle_cancel_event      __xpc_connection_handle_term_event
+__xpc_connection_remove_peer_async        __xpc_connection_unwind_peers
+__xpc_connection_cancelation_get_description
+```
 
-### iOS 27.0: major release (3102.120.13 → 3298.2.1)
+**Pipes:** `__xpc_pipe_derive_port`, `__xpc_pipe_init_send_port`, `__xpc_pipe_init_recv_port`,
+`__xpc_pipe_message_deserialize`, `__xpc_pipe_simpleroutine_impl`.
 
-**27.0 b1 (24A5355q)**: version 3295.0.0. `__text` grew 0x41924 → 0x530c8 (+70 KB, about +27%), the largest
-jump in this range.
+**Sessions:** `__xpc_session_activate_new`, `__xpc_session_cancel_with_code`,
+`__xpc_session_handle_incoming_error_event`, `__xpc_session_fault`.
 
-- **Connection setup split into single-purpose functions**: `__xpc_connection_init_send{,_named,_anon}`,
-  `__xpc_connection_init_recv{,_named,_anon}`, `__xpc_connection_init_no_more_senders`,
-  `__xpc_connection_init_term`, `__xpc_connection_init_cleanup_from_failed_readying`.
-  There are also new event handlers `__xpc_connection_handle_cancel_event` and `__xpc_connection_handle_term_event`.
-  Peer teardown gained `__xpc_connection_remove_peer_async`, `__xpc_connection_unwind_peers` and
-  `__xpc_connection_pipe_check_in`. The `__xpc_connection_init.cold.*` / `__xpc_connection_mach_event.cold.*`
-  paths and `__xpc_connection_bs_cancel` are gone.
-- **BS check-in info, new SPI**: `xpc_connection_set_bs_checkin_info` and `xpc_connection_consume_bs_checkin_info`,
-  checked by these strings:
-  - `"Attempt to set the bs_checkin_info on a {listener|live|peer|non-bs_type} connection."`
-  - `"Attempt to fetch the bs_checkin_info on a {listener|live|non-peer} connection."`
-  - `"Check-in is too big : %zu"`, `"[%p] invalid checkin_info length : %zu"`
-  - `"[%p] bs_checkin_info failed to encode/decode"`
-  - `"Cannot set NONE when specifying checkin info."`
+**Services & bundles:** `__xpc_init_service`, `__xpc_init_proxy`, `__add_dlopened_services`
+(discover services in dlopen'd images), `__xpc_should_add_image`, `__xpc_service_check_subname`,
+`__xpc_bundle_resolve_bundle_variant`, `__xpc_bundle_taint_with_reason`, `__xpc_realpath_cryptex`,
+`__xpc_resolve_real_path`, `__trim_trailing_slashes`, `__copy_path_in_shared_cache`,
+`__copy_key_from_plist`.
 
-  The old property was renamed: `"Attempt to change the bs_managed propertyon a live connection."` became
-  `"Attempt to change the bs_type property on a live connection."`. (In 27.0 b2 the symbol table shows
-  `xpc_connection_{set,get}_bs_type`, `xpc_connection_bs_seal_listener` and `xpc_endpoint_create_bs_{from_port,service}`.)
-- **Sanitizer support for services**: `xpc_service_instance_set_sanitizer_flags` and a `"sanitizers"` key. This
-  goes with the `"checked-allocations"` key added to `xpc_service_instance_run` in the 26.0 RC.
-- **Service discovery from dlopen'd images**: `__add_dlopened_services`, `__xpc_should_add_image`.
-  There are also new `__xpc_init_service`, `__xpc_init_proxy` and `__xpc_service_check_subname`.
-- **Bundles**: `__xpc_bundle_resolve_bundle_variant`, `__xpc_bundle_taint_with_reason`, `__xpc_realpath_cryptex`.
-  `__copy_path_in_shared_cache` returned. `__xpc_bundle_resolve_executable_{name,variant}` and
-  `__xpc_bundle_is_valid_variant` were removed.
-- **Pipes and sessions**: `__xpc_pipe_simpleroutine_impl`, `__xpc_pipe_message_deserialize`,
-  `__xpc_pipe_init_{send,recv}_port`, `__xpc_session_activate_new` (replacing `_activate_if_new`),
-  `__xpc_session_cancel_with_code`, `__xpc_session_handle_incoming_error_event`.
-- **Serialization and plist**: `__xpc_data_serialize_ool`, `__xpc_spawnattr_pack_xpc_data`,
-  `__xpc_string_cache_insert`, `__xpc_plist_parse_data`, `__xpc_plist_parse_real`, and `__xpc_log_cycle_path`
-  (looks like a reference-cycle diagnostic).
-- **Event publisher**: `__xpc_event_publisher_check_and_update_inflight_count` is now a standalone function.
-- **New imports**: `amfi_interface_authorize_local_signing_with_length`, `dispatch_io_set_low_water`.
-- **Removed/renamed** (where it can be told apart from tooling noise, see caveats): `CEXPCRuntime`,
-  `__xpc_enum2label`, `__copy_secure_plist`/`__xpc_copy_secure_plist`/`__copy_plist_from_fd`,
-  `__waiting4memory`, `__transaction_snapshot_destroy`, `__xpc_activate_endpoint`,
-  `__xpc_connection_validate_check_in_is_for_service`, `__xpc_connection_set_creds`, `__xpc_bootstrap_routine*`,
-  `__xpc_domain_routine*`, `__xpc_event_routine*`, `__xpc_control_routine`, `__xpc_vproc_routine`.
-- Strings removed: `"Attempt to send non-reply message as reply"`, `"Bug in libxpc: Unexpected disposition"`,
-  `"Invalid requested disposition in deserializer"`.
+**Serialization / misc:** `__xpc_data_serialize_ool`, `__xpc_string_cache_insert`,
+`__xpc_plist_parse_data`, `__xpc_plist_parse_real`, `__xpc_log_cycle_path`,
+`__xpc_event_publisher_check_and_update_inflight_count`, `__os_transaction_log_snapshot`,
+`__xpc_activity_is_unmanaged`, `__objc_getTaggedPointerTag`.
 
-**27.0 b2 → GM**:
+## Inlining: fewer functions, more code
 
-- b2 (3298.0.4): a full recompile. Of 1241 functions with changes, 140 changed size, nearly all by ±4–8 B, and
-  the rest differ only in hash. Larger changes: `__xpc_event_publisher_set_subscriptions` +48,
-  `xpc_create_from_plist_with_string_cache` +40, `__xpc_xml_replace_entities` +20, `CESerializeWithOptions` +20,
-  `xpc_dictionary_create` +16, `xpc_bundle_copy_normalized_cryptex_path` −20.
-- b3 (3298.0.10): the `__xpc_{date,double,uuid,pointer}_hash` functions shrank 48 → 40 B and the int64/uint64
-  hash functions 248 → 240 B, which suggests the hash routine was simplified.
-- b5 (3298.0.26.502.1): `__xpc_connection_init_{recv,send}_{named,anon,port}` and
-  `__xpc_connection_derive_connection_port` changed size. New string:
-  `"An extension with the same bundle ID already exists with a different path"`.
-- 24A435 (3298.2.1): `__xpc_event_publisher_set_subscriptions` 2076 → 2044 B,
-  `__xpc_bundle_variant_create_subpath` 428 → 480 B, `CESizeSerialization`/`CESerializeWithOptions` +4.
+Of 1,478 functions present under the same name in both: **425 are byte-identical, 1,053 changed.**
+The changed ones overwhelmingly grew. Most-changed (full table:
+[`data/changed_functions.tsv`](data/changed_functions.tsv)):
 
-### iOS 27.2 (→ 3298.40.20)
+| Δ insns | function | 26.0 → 27.2 |
+| --: | :-- | :-- |
+| **+1274** | `_xpc_create_from_plist_with_string_cache` | 709 → 1983 |
+| **−398** | `__xpc_connection_init` | 486 → 88 (split out, above) |
+| +346 | `__xpc_init_pid_domain` | 91 → 437 |
+| +339 | `__xpc_dictionary_insert` | 164 → 503 |
+| +263 | `__xpc_interface_routine` | 133 → 396 |
+| +262 | `__translate_attrs` | 84 → 346 |
+| +249 | `__xpc_bundle_resolve_executable` | 176 → 425 |
+| +226 | `__xpc_user_sessions_info_routine` | 84 → 310 |
+| +215 | `__xpc_event_publisher_set_subscriptions` | 296 → 511 |
+| +162 | `-[OS_xpc_session dealloc]` | 18 → 180 |
 
-- b1: only `_libxpc_initializer` 1524 → 1532 B.
-- b2: `__DATA_DIRTY.__bss` +8 B (one new global).
-- b3 → RC (24B115): no libxpc changes recorded.
+The pattern — callers ballooning while helper/`.cold` routines vanish from the function table —
+is inlining, and it accounts for the "1545 functions but +38% text" result.
 
-## Themes
+## Themes (what actually changed, 26.0 → 27.2)
 
-1. **Better diagnostics** (26.1, 26.4). Assertions report their expression, every connection-failure site has its
-   own message, transactions are logged, and `__oslogstring` doubled in size.
-2. **Connection lifecycle rewrite** (26.4 → 27.0). Port derivation moved into its own functions, then
-   `_xpc_connection_init` was split into send/recv × named/anon parts with explicit teardown and cancel/term handlers.
-3. **BoardServices (`bs_*`) integration grows**. `bs_managed` became `bs_type`, and check-in info can now be
-   passed through the connection with size and state checks.
-4. **Cryptex and shared-cache bundle resolution** (26.4 → 27.0). Real-path normalization covers cryptex prefixes,
-   and bundles can be "tainted" with a reason.
-5. **Tooling for services**: sanitizer flags, checked allocations, discovery of services in dlopen'd images.
-6. **Legacy removal**: `xpc_event_stream_check_in{,2}` and `xpc_bundle_copy_resource_path` (26.1), the system-version
-   code (26.4), and several old `*_routine` MIG-era helpers (27.0).
+1. **Connection lifecycle rewrite.** `_xpc_connection_init` was decomposed into explicit
+   send/recv × named/anon paths plus dedicated no-more-senders / term / cancel handlers and peer
+   teardown. Provable from both the new symbols and the 486→88 shrink.
+2. **BoardServices check-in SPI.** New public `xpc_connection_{set,consume}_bs_checkin_info`,
+   `bs_managed` renamed to `bs_type`, guarded by a strict connection-state machine.
+3. **Sanitizer / correctness hardening.** New `xpc_service_instance_set_sanitizer_flags` + a
+   `"sanitizers"` key; new misuse faults (reply-as-notification, type mismatch, oversized/NULL
+   xpc_data); +112 expression-carrying assertions.
+4. **Per-site diagnostics.** Connection failures went from fragment assembly to one explicit
+   string per failure site; transactions now log create/release.
+5. **Service discovery & cryptex-aware bundles.** Services can be registered from dlopen'd images;
+   bundle resolution gained cryptex real-path normalization and variant/taint handling.
+6. **Legacy removal.** `xpc_event_stream_check_in{,2}`, `xpc_bundle_copy_resource_path`, and the
+   in-libxpc system-version-string family were dropped from the exports.
 
-## Caveats
+## How this was produced
 
-- **Gaps in the data.** The libxpc version changed in several steps that have no libxpc diff in the repo (listed
-  above). Any changes in those builds are missing here. There are no libxpc diffs after 27.2 b2.
-- **Device changes.** The source IPSWs move from iPhone17,1 (26.0) to iPhone18,1 (26.1–27.0) and then iPhone19,2/3/7
-  (27.0 24A437 onward). The jump in `__text` from 0x5306c (iPhone18,1, 24A435) to 0x51b58 (iPhone19,2, 24A437)
-  comes from the device switch. It is not a code change.
-- **The 27.0 b1 diff format changed.** It adds sha256 per section, reports `__auth_stubs` and the objc name sections
-  as 0x0, and drops every `.cold.N` / `OUTLINED_FUNCTION_N` symbol. That explains most of the drop from 1936 to
-  1545 functions and from 4633 to 3479 symbols. The objc type/selector strings (`OS_xpc_*`, `v16@0:8`, …) also
-  disappear from `__cstring` while `__objc_classlist` keeps the same size. These are almost certainly
-  shared-cache/tooling artifacts. Removals from that diff are listed only where they match a real refactor. Public
-  API such as `xpc_dictionary_get_connection` or `xpc_rich_error_create`, which appear in its removed list, should
-  be checked against a live 27.x cache before concluding they are gone.
-- Symbol counts dropped again (3479 → 2427) somewhere in 27.0 b3/b4 while the function count stayed at 1545. This
-  is also a symbol-table effect.
+```
+# per build (iPhone17,1 restore image):
+ipsw fw aea <SystemOS .dmg.aea>            # decrypt (keys bundled in ipsw)
+7z x <dmg> 'System/Library/Caches/com.apple.dyld/*'   # extract dyld_shared_cache (no mount)
+#   + LZBITMAP resource-fork files decompressed with a small lzfse helper
+ipsw dyld extract <dsc> libxpc.dylib       # slide+stubs+objc
+ipsw dyld macho   <dsc> libxpc.dylib --loads --symbols --strings --starts
+ipsw dyld disass  <dsc> --image libxpc.dylib
+```
+Disassembly was normalized (addresses, `loc_`/`sub_`, absolute immediates masked) before diffing
+so that only real instruction changes register. Scripts and intermediates live under the session
+scratchpad; the reduced diff lists are in [`data/`](data).
+
+### Caveats
+
+- **Private symbol names are stripped in iOS 27**, so a raw local-symbol name diff overstates
+  removals (see [Reliable signals](#reliable-signals-vs-noise)). Export trie, strings, and
+  function bodies are used instead and are not affected.
+- The 27.2 binary is libxpc **3298.42.1**, marginally newer than the last build that carried a
+  libxpc diff in the repo's chain (3298.40.20, 27.2 b1).
+- Device is iPhone17,1 for both ends (the repo's per-build chain switches devices mid-stream);
+  this avoids the spurious size deltas that device switches introduce.
